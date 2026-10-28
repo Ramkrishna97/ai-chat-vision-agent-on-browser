@@ -1,0 +1,23 @@
+{
+  "name": "lite-ai-chat",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "test": "node --test",
+    "preview": "vite preview",
+    "start": "node server/index.js",
+    "bridge": "node server/bridge.js"
+  },
+  "dependencies": {
+    "@wllama/wllama": "^3.8.1",
+    "lucide-react": "^0.468.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "vite": "^6.0.0"
+  }
+}
