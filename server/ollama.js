@@ -1,11 +1,15 @@
 const ollamaBase = process.env.OLLAMA_URL || 'http://127.0.0.1:11434';
 
 async function request(path, body, signal) {
+  const timeoutMs = path === '/api/tags' || path === '/api/show' || body?.keep_alive === 0 ? 10000 : body?.prompt === '' ? 120000 : 300000;
   const response = await fetch(`${ollamaBase}${path}`, {
     method: body === undefined ? 'GET' : 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
-    signal,
+    signal: signal || AbortSignal.timeout(timeoutMs),
+  }).catch(error => {
+    if (error.name === 'TimeoutError') throw new Error('Ollama did not respond. Check that it is running.');
+    throw error;
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.error || `Ollama returned ${response.status}.`);
@@ -36,13 +40,16 @@ export function normalizeModel(summary, details) {
 
 export async function listModels(signal) {
   const tags = await request('/api/tags', undefined, signal);
-  const local = (tags.models || []).filter(summary => !summary.remote_model && !summary.remote_host && !String(summary.name).endsWith(':cloud'));
-  const models = await Promise.all(local.map(async summary => {
-    try { return normalizeModel(summary, await request('/api/show', { model: summary.name }, signal)); }
-    catch { return normalizeModel(summary, {}); }
-  }));
+  const local = (tags.models || []).filter(summary => !summary.remote_model && !summary.remote_host && !/cloud$/i.test(String(summary.name || summary.model)));
+  const models = [];
+  for (let index = 0; index < local.length; index += 4) {
+    models.push(...await Promise.all(local.slice(index, index + 4).map(async summary => {
+      try { return normalizeModel(summary, await request('/api/show', { model: summary.name || summary.model }, signal)); }
+      catch { return normalizeModel(summary, {}); }
+    })));
+  }
   return models.filter(model => model.capabilities.chat || model.capabilities.imageGeneration)
-    .sort((a, b) => (a.size || Infinity) - (b.size || Infinity));
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
 }
 
 export function ollamaChat(body, signal) {
@@ -58,4 +65,28 @@ export function ollamaChat(body, signal) {
 
 export function ollamaImage(body, signal) {
   return request('/api/generate', { model: body.model, prompt: body.prompt, stream: false }, signal);
+}
+
+export function ollamaStart(body, signal) {
+  return request('/api/generate', { model: body.model, prompt: '', stream: false, keep_alive: -1 }, signal);
+}
+
+export function ollamaStop(body, signal) {
+  return request('/api/generate', { model: body.model, prompt: '', stream: false, keep_alive: 0 }, signal);
+}
+
+export async function ollamaChatStream(body, signal) {
+  const response = await fetch(`${ollamaBase}/api/chat`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, signal,
+    body: JSON.stringify({
+      model: body.model, messages: body.messages, stream: true,
+      think: body.think, tools: body.tools,
+      options: { num_ctx: body.context, num_predict: body.maxTokens, temperature: body.temperature },
+    }),
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error || `Ollama returned ${response.status}.`);
+  }
+  return response;
 }
