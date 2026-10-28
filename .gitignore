@@ -3,3 +3,5 @@ dist/
 .env
 .vercel/
 .netlify/
+.litechat-runner.json
+bridge-origin.txt
