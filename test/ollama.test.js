@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeModel, listModels, ollamaImage } from '../server/ollama.js';
+import { normalizeModel, listModels, ollamaImage, ollamaChatStream, ollamaStart, ollamaStop } from '../server/ollama.js';
 
 test('Ollama capabilities map to the controls shown in the UI', () => {
   const model = normalizeModel({ name: 'local:small', size: 100 }, {
@@ -14,7 +14,7 @@ test('Ollama capabilities map to the controls shown in the UI', () => {
   assert.equal(model.context, 8192);
 });
 
-test('discovery keeps local usable models and sorts by size', async () => {
+test('discovery keeps local usable models and sorts by name', async () => {
   const original = globalThis.fetch;
   globalThis.fetch = async (url, options) => {
     if (url.endsWith('/api/tags')) return { ok: true, json: async () => ({ models: [
@@ -24,7 +24,7 @@ test('discovery keeps local usable models and sorts by size', async () => {
     const name = JSON.parse(options.body).model;
     return { ok: true, json: async () => ({ capabilities: name === 'embed' ? ['embedding'] : ['completion'] }) };
   };
-  try { assert.deepEqual((await listModels()).map(model => model.id), ['small', 'large']); }
+  try { assert.deepEqual((await listModels()).map(model => model.id), ['large', 'small']); }
   finally { globalThis.fetch = original; }
 });
 
@@ -41,5 +41,23 @@ test('image models use Ollama generation without a separate image app', async ()
     assert.equal((await ollamaImage({ model: model.id, prompt: 'A tree' })).image, 'iVBORw0KGgo=');
     assert.equal(request.url.endsWith('/api/generate'), true);
     assert.equal(request.body.stream, false);
+  } finally { globalThis.fetch = original; }
+});
+
+test('model switching requests unload and preload, and chat streams chunks', async () => {
+  const original = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, body: JSON.parse(options.body) });
+    return { ok: true, json: async () => ({ done: true }), body: new ReadableStream() };
+  };
+  try {
+    await ollamaStop({ model: 'old' });
+    await ollamaStart({ model: 'new' });
+    await ollamaChatStream({ model: 'new', messages: [{ role: 'user', content: 'Hi' }], tools: [{ type: 'function' }] });
+    assert.deepEqual(calls.map(call => [call.body.model, call.body.keep_alive, call.body.stream]), [
+      ['old', 0, false], ['new', -1, false], ['new', undefined, true],
+    ]);
+    assert.deepEqual(calls[2].body.tools, [{ type: 'function' }]);
   } finally { globalThis.fetch = original; }
 });
