@@ -4,7 +4,9 @@ A local-first chat workspace. The web app runs as static files. It can load a GG
 
 ## Quick start
 
-Run `npm install` and `npm run dev` to open the app locally. For a production build, use `npm run build` and `npm start`.
+On Windows, double-click **`start.bat`** in File Explorer. On the first run it installs npm dependencies, then opens the app at `http://127.0.0.1:5173/` and starts the local bridge in a separate window. The opened browser session pairs with the bridge automatically. Double-click **`stop.bat`** to stop the app and bridge launched by `start.bat`. These files run on your Windows computer, not on Netlify.
+
+Alternatively, run `npm install` and `npm run dev` manually. For a production build, use `npm run build` and `npm start`.
 
 ### Browser GGUF
 
@@ -22,6 +24,8 @@ npm run bridge
 
 The bridge prints a pairing code. Enter it in **Settings**, then click **Connect & discover Ollama**. Model names and capabilities come from Ollama's `/api/tags` and `/api/show` endpoints. The app lists local chat and image models; cloud-tagged Ollama models are excluded. Small local models appear first.
 
+The model picker loads a selected model and unloads the previous one. The refresh button unloads the selected model and rediscovers available models. Chat replies appear as they stream; image generation and Agent mode show elapsed time and task progress.
+
 Agent mode appears only for models that advertise tool use. In that mode the model plans, asks the bridge to run commands, reads command output, and continues for up to 12 rounds. CMD and PowerShell are supported on Windows; `/bin/sh` is used elsewhere. The bridge runs locally and requires its pairing code. Commands have a 60-second timeout, and output is capped to 20 KB. Set `WORKSPACE_ROOT` before starting the bridge to choose its initial working directory. Shell commands themselves have full user-level access, so use Agent mode only with models and tasks you trust.
 
 To connect a deployed site to the bridge, set `APP_ORIGIN` to its exact HTTPS origin before running `npm run bridge`. Example:
@@ -34,6 +38,8 @@ npm run bridge
 
 Browser private-network and cross-origin rules vary. If a hosted page cannot reach the bridge, open the app locally with `npm start` on the same computer.
 
+For a Netlify page, the bridge must run on the **same device as the browser**. On Windows, copy `bridge-origin.example.txt` to `bridge-origin.txt`, replace the example URL with your exact deployed HTTPS origin, and run `start.bat` again. The bridge window prints the pairing code to enter in the deployed site's Settings. Allow a browser local-network access prompt if shown. Alternatively, set `APP_ORIGIN` before running `npm run bridge` manually. `127.0.0.1` on a phone refers to the phone, so a phone cannot reach a bridge running on a PC through that address. A static Netlify deployment cannot itself run Ollama or operating-system commands.
+
 ## Deployment
 
 | Host | Setup |
@@ -41,6 +47,21 @@ Browser private-network and cross-origin rules vary. If a hosted page cannot rea
 | Netlify | Import this repository; `netlify.toml` builds and publishes `dist`. |
 | Vercel | Import this repository; `vercel.json` builds and publishes `dist`. |
 | Render | Create a Blueprint from `render.yaml`. |
+
+### Netlify build settings
+
+Push the project to a Git repository with a `main` branch, then import that repository in Netlify. Enter these values when asked:
+
+| Field | Value |
+| --- | --- |
+| Branch to deploy | `main` |
+| Base directory | Leave blank (project is at the repository root) |
+| Build command | `npm run build` |
+| Publish directory | `dist` |
+| Functions directory | Leave blank |
+| Environment variables | None required for the static site |
+
+The included `netlify.toml` already sets the build command, publish directory, and single-page app redirect. After deployment, load a GGUF in the browser, or run the local bridge on your computer with `APP_ORIGIN` set to the deployed site's exact HTTPS origin as shown above. The pairing code belongs in the app's Settings, not in Netlify environment variables.
 
 Hosting serves only the interface and WebAssembly runtime. GGUF inference uses the browser device. Ollama inference and commands use a bridge running on the user's computer. Neither a serverless host nor a phone browser can execute arbitrary OS commands on the user's PC by itself.
 
