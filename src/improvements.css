@@ -1,0 +1,11 @@
+.model-picker .model-connect{border:0;background:transparent;color:inherit;font-size:12px;white-space:nowrap;padding:5px 0}
+.model-picker .model-connect:hover{text-decoration:underline}
+.work-indicator{display:flex;align-items:center;gap:5px;height:22px}
+.work-indicator span{display:block;width:24px;height:4px;border-radius:4px;background:#68ad78;animation:work-pulse 1.2s ease-in-out infinite}
+.work-indicator span:nth-child(2){animation-delay:.2s}
+.work-indicator span:nth-child(3){animation-delay:.4s}
+.live-cursor{display:inline-block;width:5px;height:1em;margin-left:3px;vertical-align:-2px;background:#68ad78;animation:cursor-blink .8s steps(1) infinite}
+.step summary,.thinking-block summary{cursor:pointer;font-weight:700;color:#52765c}
+.step[open] summary{margin-bottom:6px}
+@keyframes work-pulse{0%,100%{opacity:.25;transform:scaleX(.65)}50%{opacity:1;transform:scaleX(1)}}
+@keyframes cursor-blink{50%{opacity:0}}
