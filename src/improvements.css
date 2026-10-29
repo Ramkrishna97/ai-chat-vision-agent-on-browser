@@ -9,3 +9,4 @@
 .step[open] summary{margin-bottom:6px}
 @keyframes work-pulse{0%,100%{opacity:.25;transform:scaleX(.65)}50%{opacity:1;transform:scaleX(1)}}
 @keyframes cursor-blink{50%{opacity:0}}
+.settings-subhead{font-size:12px;margin:12px 0 8px;color:#4b6954}.skill-list{display:grid;gap:7px}.settings-panel .skill-option{display:flex;flex-direction:row;align-items:flex-start;gap:9px;padding:9px;margin:0;border:1px solid #dce5da;border-radius:8px}.settings-panel .skill-option input{width:auto;padding:0;margin:3px 0 0;flex:none}.skill-option span{display:grid;gap:3px}.skill-option strong{font-size:12px}.skill-option small{font-size:11px;line-height:1.4;color:#819087}.settings-note{overflow-wrap:anywhere}html[data-theme="dark"] .skill-option{border-color:#3b5140}html[data-theme="dark"] .settings-subhead{color:#a9caaa}
