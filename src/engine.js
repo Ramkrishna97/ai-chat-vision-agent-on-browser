@@ -1,6 +1,8 @@
 import { ggufChat, resumeGguf, unloadGguf } from './localModels.js';
 import { agentRunTarget } from './agentRunTarget.js';
 import { textToolCalls } from './agentToolCalls.js';
+import { ollamaUsage } from './contextUsage.js';
+import { failingSourcePath, repairPrompt } from './agentDiagnostics.js';
 
 function bridgeBase(settings) {
   const configured = settings.bridgeUrl.replace(/\/$/, '');
@@ -81,7 +83,7 @@ async function streamOllama(body, settings, signal, onUpdate) {
   }
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
-  let buffer = ''; let content = ''; let thinking = ''; const toolCalls = [];
+  let buffer = ''; let content = ''; let thinking = ''; let usage = null; const toolCalls = [];
   while (true) {
     const { value, done } = await reader.read();
     buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
@@ -94,12 +96,13 @@ async function streamOllama(body, settings, signal, onUpdate) {
       if (part.error) throw new Error(part.error);
       content += part.message?.content || '';
       thinking += part.message?.thinking || '';
+      usage = ollamaUsage(part) || usage;
       if (part.message?.tool_calls) toolCalls.push(...part.message.tool_calls);
-      onUpdate(splitThought(content, thinking));
+      onUpdate({ ...splitThought(content, thinking), usage });
     }
     if (done) break;
   }
-  return { role: 'assistant', ...splitThought(content, thinking), ...(toolCalls.length ? { tool_calls: toolCalls } : {}) };
+  return { role: 'assistant', ...splitThought(content, thinking), usage, ...(toolCalls.length ? { tool_calls: toolCalls } : {}) };
 }
 
 export async function complete(model, messages, settings, signal, tools, onUpdate) {
@@ -119,7 +122,7 @@ export async function complete(model, messages, settings, signal, tools, onUpdat
     temperature: settings.temperature,
   }, signal);
   const answer = result.message || { content: '' };
-  return { ...answer, ...splitThought(answer.content, answer.thinking) };
+  return { ...answer, ...splitThought(answer.content, answer.thinking), usage: ollamaUsage(result) };
 }
 
 export async function generateImage(model, prompt, settings, signal) {
@@ -202,11 +205,21 @@ export async function runAgent(model, userText, history, settings, signal, onSte
   onStep({ kind: 'plan', text: plan.content || plan.thinking || 'Plan ready.', live: false, replace: true });
   let toolsUsed = 0;
   let retryNeeded = 0;
+  let repairRetries = 0;
   let projectStatus;
   let projectFilesWritten = false;
   let projectRunSucceeded = false;
   let projectRunAttempted = false;
   const writtenPaths = [];
+  async function failureFeedback(status) {
+    const path = failingSourcePath(writtenPaths, status?.output);
+    let source;
+    if (path) {
+      try { source = (await bridge('/read-file', settings, { workspaceId: workspace.id, path }, signal)).content; }
+      catch { /* The compiler output is still enough to guide a retry. */ }
+    }
+    return repairPrompt(status, path, source);
+  }
   for (let i = 0; i < 30; i++) {
     if (signal.aborted) throw new DOMException('Stopped', 'AbortError');
     const tail = messages.slice(-12);
@@ -231,11 +244,15 @@ export async function runAgent(model, userText, history, settings, signal, onSte
         catch (error) { projectStatus = { exitCode: -1, output: error.message }; }
         projectRunSucceeded = projectStatus.exitCode === 0;
         onStep({ kind: 'result', text: `Exit ${projectStatus.exitCode}\n${projectStatus.output}` });
-        messages.push({ role: 'user', content: `The project was run automatically after writing files. Exit ${projectStatus.exitCode}. Output:\n${String(projectStatus.output || '').slice(-3000)}\n${projectRunSucceeded ? 'Summarize the verified result.' : 'Fix the failure and run again using the tools.'}` });
+        messages.push({ role: 'user', content: projectRunSucceeded ? `The project ran successfully. Output:\n${String(projectStatus.output || '').slice(-3000)}\nSummarize the verified result.` : await failureFeedback(projectStatus) });
         continue;
       }
-      if ((!toolsUsed || requiresCode && !projectFilesWritten || (projectStatus && projectStatus.exitCode !== 0) || (projectFilesWritten && !projectRunSucceeded)) && retryNeeded++ < 2) {
-        messages.push({ role: 'user', content: projectStatus && projectStatus.exitCode !== 0 ? 'The project did not build or run successfully. Correct it and run it again with the tools.' : projectFilesWritten && !projectRunSucceeded ? 'You created code files but have not run the project. Call run_project with action run, inspect its output, and fix any failure.' : 'No source file has been created. An echo command is not a created program. Call write_file now. If you cannot return a native tool call, reply with only valid JSON like {"name":"write_file","arguments":{"path":"Hello.js","content":"console.log(1)"}}. Use the actual requested filename and complete source code.' });
+      if (projectStatus && projectStatus.exitCode !== 0 && repairRetries++ < 4) {
+        messages.push({ role: 'user', content: await failureFeedback(projectStatus) });
+        continue;
+      }
+      if ((!toolsUsed || requiresCode && !projectFilesWritten || (projectFilesWritten && !projectRunSucceeded && !projectStatus)) && retryNeeded++ < 2) {
+        messages.push({ role: 'user', content: projectFilesWritten ? 'You created code files but have not run the project. Call run_project with action run, inspect its output, and fix any failure.' : 'No source file has been created. An echo command is not a created program. Call write_file now. If you cannot return a native tool call, reply with only valid JSON like {"name":"write_file","arguments":{"path":"Hello.js","content":"console.log(1)"}}. Use the actual requested filename and complete source code.' });
         continue;
       }
       if (projectStatus && projectStatus.exitCode !== 0) return `Project run failed. Review the tool result above.\n${projectStatus.output}`;
@@ -275,6 +292,9 @@ export async function runAgent(model, userText, history, settings, signal, onSte
       messages.push(model.source === 'gguf'
         ? { role: 'tool', tool_call_id: call.id, content: JSON.stringify(feedback) }
         : { role: 'tool', content: JSON.stringify(feedback) });
+    }
+    if (projectStatus?.exitCode !== undefined && projectStatus.exitCode !== 0 && projectRunAttempted) {
+      messages.push({ role: 'user', content: await failureFeedback(projectStatus) });
     }
   }
   const lastTarget = agentRunTarget(writtenPaths) || (projectFilesWritten ? '.' : null);

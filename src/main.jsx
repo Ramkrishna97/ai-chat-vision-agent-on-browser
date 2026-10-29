@@ -1,10 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { ArrowDownToLine, ArrowUp, FolderOpen, Image, Menu, MessageCircle, Moon, Paperclip, Plus, RefreshCw, Settings, Sparkles, Square, Sun, Terminal, Trash2, X } from 'lucide-react';
+import { ArrowUp, FolderOpen, Image, Menu, MessageCircle, Moon, Paperclip, Plus, RefreshCw, Settings, Sparkles, Square, Sun, Terminal, Trash2, X } from 'lucide-react';
 import { listChats, saveChat, deleteChat } from './storage.js';
 import { loadGguf, getGgufModel, validateGguf } from './localModels.js';
 import { discoverOllama, discoverSkills, pairLocalBridge, complete, generateImage, runAgent, offloadModel, activateModel } from './engine.js';
 import { stoppedResult } from './stoppedResult.js';
+import { contextLimit, estimatedConversationTokens } from './contextUsage.js';
+import Conversation from './Conversation.jsx';
 import './styles.css';
 import './local.css';
 import './improvements.css';
@@ -38,7 +40,8 @@ function App() {
   const abortRef = useRef(null);
   const ggufInput = useRef(null);
   const attachmentInput = useRef(null);
-  const bottom = useRef(null);
+  const conversationRef = useRef(null);
+  const followBottomRef = useRef(true);
   const activeIdRef = useRef('');
   const chatsRef = useRef([]);
   const model = models.find(item => item.id === selected);
@@ -62,7 +65,10 @@ function App() {
       refreshModels(true, paired);
     } else refreshModels(true);
   }, []);
-  useEffect(() => { bottom.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, steps, busy]);
+  useEffect(() => {
+    const panel = conversationRef.current;
+    if (panel && followBottomRef.current) panel.scrollTop = panel.scrollHeight;
+  }, [messages, steps, liveAnswer, busy, activeId]);
   useEffect(() => {
     if (!busy) return;
     setElapsed(0);
@@ -72,6 +78,7 @@ function App() {
   }, [busy]);
 
   function openChat(chat) {
+    followBottomRef.current = true;
     activeIdRef.current = chat.id; setActiveId(chat.id); setMessages(chat.messages || []);
     setShowChats(false);
     history.replaceState(null, '', '?chat=' + encodeURIComponent(chat.id));
@@ -173,6 +180,7 @@ function App() {
     const text = draft.trim();
     if (!text || !model || busy) return;
     if (mode === 'agent' && !connected) { setError('Agent mode needs the local bridge. Start it on this device, pair it in Settings, and connect to Ollama.'); setShowSettings(true); return; }
+    followBottomRef.current = true;
     setError(''); setBusy(true); setSteps([]); setLiveAnswer(null);
     const selectedFiles = files;
     const before = messages;
@@ -204,7 +212,7 @@ function App() {
           ? { role: 'user', content: prompt, ...(media.length ? { images: await Promise.all(mediaFiles.map(async file => (await dataUrl(file)).split(',')[1])) } : {}) }
           : { role: 'user', content: media.length ? [...media.map(item => ({ type: item.type, data: item.bytes })), { type: 'text', text: prompt }] : prompt };
         const answer = await complete(model, [...history, current], settings, controller.signal, undefined, update => { partialAnswer = update; setLiveAnswer(update); });
-        result = { text: answer.content || '(No text returned)', thinking: answer.thinking || '' };
+        result = { text: answer.content || '(No text returned)', thinking: answer.thinking || '', usage: answer.usage || null };
       }
       if (controller.signal.aborted) throw new DOMException('Stopped', 'AbortError');
       await persist([...before, user, { id: id(), role: 'assistant', mode, ...result }]);
@@ -222,6 +230,10 @@ function App() {
   }
   const update = (key, value) => setSettings(previous => ({ ...previous, [key]: value }));
   const attachable = (mode === 'chat' || mode === 'agent') && (caps.vision || caps.file || caps.audio);
+  const contextMax = contextLimit(settings, model);
+  const reportedUsage = liveAnswer?.usage || (!busy && messages.findLast(item => item.role === 'assistant')?.usage);
+  const liveContext = reportedUsage?.used ?? estimatedConversationTokens(messages, liveAnswer?.content || '');
+  const contextApproximate = !reportedUsage;
 
   return <div className="app-shell">
     <aside className={'sidebar ' + (showChats ? 'show-mobile-chats' : '')}><div className="brand"><div className="brand-icon"><Sparkles size={18} /></div>lite<span className="brand-light">chat</span><button className="close-mobile-chats" onClick={() => setShowChats(false)} aria-label="Close chats"><X size={18} /></button></div>
@@ -233,7 +245,7 @@ function App() {
       <div className="header-actions"><button className="icon-button mobile-new" onClick={() => setShowChats(true)} title="Chats" aria-label="Chats"><Menu size={19} /></button><button className="icon-button" onClick={() => ggufInput.current?.click()} title="Load GGUF"><FolderOpen size={18} /></button><button className="icon-button" onClick={() => refreshModels()} title="Refresh models and unload current model" aria-label="Refresh models and unload current model" disabled={busy || loading || modelBusy}><RefreshCw size={17} /></button><button className="icon-button" onClick={() => setShowSettings(true)} title="Settings"><Settings size={18} /></button>
         <div className="model-picker"><span className="model-dot" />{models.length ? <select aria-label="Select model" value={selected} disabled={busy || loading || modelBusy} onChange={event => chooseModel(event.target.value)}><option value="">{loading ? 'Loading GGUF…' : modelBusy ? 'Switching…' : 'Select model'}</option>{models.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select> : <button className="model-connect" onClick={() => setShowSettings(true)}>Connect model</button>}</div></div><input ref={ggufInput} type="file" accept=".gguf" multiple hidden onChange={loadLocal} />
     </header>
-      <section className="conversation" aria-label="Conversation">{messages.length ? <div className="message-list">{messages.map(item => <div className={'message ' + item.role} key={item.id}>{item.role === 'assistant' && <div className="avatar"><Sparkles size={16} /></div>}<div className="message-content">{item.role === 'assistant' && <div className="message-author">Lite Chat</div>}{item.text && <div className="message-text">{item.text}</div>}{item.files?.length > 0 && <div className="message-files">{item.files.map(name => <span key={name}><Paperclip size={12} />{name}</span>)}</div>}{item.thinking && <details className="thinking-block"><summary>Thinking</summary><pre>{item.thinking}</pre></details>}{item.steps && <StepList steps={item.steps} />}{item.image && <div className="generated-image"><img src={item.image} alt="Generated artwork" /><a href={item.image} download="local-image.png"><ArrowDownToLine size={16} /> Download</a></div>}</div></div>)}{busy && <div className="message assistant"><div className="avatar"><Sparkles size={16} /></div><div className="message-content"><div className="message-author">{mode === "image" ? "Creating image" : mode === "agent" ? "Planning and running" : liveAnswer?.content ? "Writing response" : "Reading your request"} · {elapsed}s</div>{liveAnswer?.thinking && <details className="thinking-block" open><summary>Thinking</summary><pre>{liveAnswer.thinking}</pre></details>}{liveAnswer?.content ? <div className="message-text">{liveAnswer.content}<span className="live-cursor" /></div> : steps.length ? <StepList steps={steps} /> : <div className="work-indicator"><span /><span /><span /></div>}</div></div>}<div ref={bottom} /></div> : <div className="welcome"><div className="welcome-icon"><Sparkles size={29} /></div><div className="eyebrow">LOCAL AI WORKSPACE</div><h1>Your ideas, <em>your device.</em></h1><p>Connect Ollama or open a GGUF model to begin.<br />Your chats stay in this browser.</p><div className="start-actions"><button onClick={() => ggufInput.current?.click()}><FolderOpen size={17} /> Load GGUF</button><button onClick={() => setShowSettings(true)}><Settings size={17} /> Connect Ollama</button></div></div>}</section>
+      <Conversation messages={messages} busy={busy} mode={mode} liveAnswer={liveAnswer} steps={steps} elapsed={elapsed} contextMax={contextMax} contextUsed={liveContext} contextApproximate={contextApproximate} conversationRef={conversationRef} followBottomRef={followBottomRef} onLoadGguf={() => ggufInput.current?.click()} onSettings={() => setShowSettings(true)} />
       <div className="composer-zone"><div className="composer-wrap">{error && <div className="error-banner" role="alert">{error}<button onClick={() => setError('')} aria-label="Dismiss"><X size={15} /></button></div>}<div className="mode-row">{modes.map(name => <button key={name} className={'mode-tab ' + (mode === name ? 'selected' : '')} onClick={() => { if (name === 'agent' && !connected) { setError('Connect the local bridge in Settings before using Agent mode.'); setShowSettings(true); return; } setMode(name); setFiles([]); }}>{name === 'chat' ? <MessageCircle size={15} /> : name === 'image' ? <Image size={15} /> : <Terminal size={15} />}{name === 'image' ? 'Create image' : name === 'agent' ? 'Agent' : 'Chat'}</button>)}<span className="mode-hint">{model ? model.source + ' · ' + Object.entries(caps).filter(([, value]) => value).map(([name]) => name).join(', ') : 'Choose a model to begin'}</span></div><div className="composer">{files.length > 0 && <div className="attachments">{files.map((file, index) => <span key={index}><Paperclip size={13} />{file.name}<button onClick={() => setFiles(previous => previous.filter((_, i) => i !== index))}><X size={13} /></button></span>)}</div>}<textarea rows="2" value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send(); } }} placeholder={!model ? 'Load a model to begin…' : mode === 'agent' ? 'Describe the task to plan, build, and test…' : mode === 'image' ? 'Describe the image to create…' : 'Ask anything…'} aria-label="Message" /><div className="composer-actions"><div className="attach-wrap">{attachable && <><button className="attach-button" onClick={() => attachmentInput.current?.click()} title="Attach supported file"><Paperclip size={19} /></button><input ref={attachmentInput} type="file" hidden multiple accept={[caps.vision && 'image/png,image/jpeg,image/webp,image/gif', caps.audio && '.wav,audio/wav', caps.file && '.txt,.md,.csv,.json,.js,.jsx,.ts,.tsx,.py,.java,.css,.html'].filter(Boolean).join(',')} onChange={addAttachments} /></>}<span className="composer-tip">Enter to send · Shift + Enter for new line</span></div><button className={'send-button ' + (busy ? 'is-busy' : '')} onClick={busy ? () => abortRef.current?.abort() : send} disabled={!busy && (!draft.trim() || !model)} aria-label={busy ? 'Stop' : 'Send'}>{busy ? <Square size={16} fill="currentColor" /> : <ArrowUp size={20} />}</button></div></div><div className="footer-note">Runs on your device · Agent commands require a paired local bridge</div></div></div>
     </main>
     {showSettings && <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) setShowSettings(false); }}><div className="settings-panel" role="dialog" aria-modal="true" aria-label="Settings"><div className="settings-head"><h2>Settings</h2><button onClick={() => setShowSettings(false)} aria-label="Close"><X size={20} /></button></div>
@@ -258,7 +270,4 @@ function App() {
   </div>;
 }
 
-function StepList({ steps }) { return <div className="step-list">{steps.map((step, index) => step.kind === 'plan' || step.kind === 'thought'
-  ? <details className={'step ' + step.kind} key={`${index}-${!!step.live}`} open={!!step.live}><summary>{step.kind === 'plan' ? 'Plan' : 'Thinking'}{step.live ? ' · live' : ''}</summary><pre>{step.text}</pre></details>
-  : <div className={'step ' + step.kind} key={index}><strong>{step.kind === 'command' ? 'Command' : step.kind === 'workspace' ? 'Workspace' : step.kind === 'skill' ? 'Skills' : 'Result'}</strong><pre>{step.text}</pre></div>)}</div>; }
 createRoot(document.getElementById('root')).render(<App />);
