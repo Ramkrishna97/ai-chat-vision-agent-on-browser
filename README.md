@@ -22,17 +22,21 @@ Install and start Ollama on the **same computer** as the bridge. Then run:
 npm run bridge
 ```
 
-The bridge prints a pairing code. Enter it in **Settings**, then click **Connect & discover Ollama**. Model names and capabilities come from Ollama's `/api/tags` and `/api/show` endpoints. The app lists local chat and image models; cloud-tagged Ollama models are excluded. Small local models appear first.
+The bridge prints a pairing code. Enter it in **Settings**, then click **Connect & discover Ollama**. Model names and capabilities come from Ollama's `/api/tags` and `/api/show` endpoints. The app lists local chat and image models alphabetically; cloud-tagged Ollama models are excluded.
 
 The model picker loads a selected model and unloads the previous one. The refresh button unloads the selected model and rediscovers available models. Chat replies appear as they stream; image generation and Agent mode show elapsed time and task progress.
 
-Agent mode appears only for models that advertise tool use. In that mode the model plans, asks the bridge to run commands, reads command output, and continues for up to 12 rounds. CMD and PowerShell are supported on Windows; `/bin/sh` is used elsewhere. The bridge runs locally and requires its pairing code. Commands have a 60-second timeout, and output is capped to 20 KB. Set `WORKSPACE_ROOT` before starting the bridge to choose its initial working directory. Shell commands themselves have full user-level access, so use Agent mode only with models and tasks you trust.
+Agent mode appears only for models that advertise tool use. Each chat gets a persistent local workspace under `%LOCALAPPDATA%\LiteChat\workspaces` on Windows (or `~/.local/share/lite-chat/workspaces` elsewhere). The workspace path appears in the agent's steps. Set `AGENT_WORKSPACES_ROOT` before starting the bridge to choose another parent folder. The agent can list and read files, write complete files, run commands, and build and test code. It continues for up to 30 tool rounds. When code has been written but the model omits a run call, the app runs it and returns the result to the model. The runner supports Java, Maven, Gradle, Python, and JavaScript. It uses a Maven or Gradle wrapper when present, otherwise the installed tool; it can build, test, and run a configured main class or task. Install a JDK for plain Java, and Maven or Gradle when the project has no wrapper. CMD and PowerShell are supported on Windows; `/bin/sh` is used elsewhere. The bridge runs locally and requires its pairing code. A tool-capable browser GGUF model can use Agent mode when the bridge is paired, even without Ollama. `WORKSPACE_ROOT` still controls the bridge's legacy command directory for requests without a chat workspace. Separate folders keep chat files out of the app repository, but they do not provide VM security: shell commands have full user-level access, so use Agent mode only with models and tasks you trust.
+
+### Agent skills
+
+Agent mode includes small built-in skills for building and verifying work, Java, web and Node, Python, and debugging. Relevant instructions load automatically; the agent can request others with its `read_skill` tool. Enable or disable skills in Settings. To add a custom skill, create `%LOCALAPPDATA%\LiteChat\skills\your-skill\SKILL.md` (or `~/.local/share/lite-chat/skills/your-skill/SKILL.md` elsewhere). Start the file with `# Skill name` and `Description: When to use it.` Reconnect the bridge to refresh the list. Set `AGENT_SKILLS_ROOT` to use another skills folder. A custom skill is loaded automatically if its folder name appears in the request, or the model can call `read_skill` when it sees a matching description. Skills are local text instructions, so keep them short enough for your model's context window.
 
 To connect a deployed site to the bridge, set `APP_ORIGIN` to its exact HTTPS origin before running `npm run bridge`. Example:
 
 ```powershell
 $env:APP_ORIGIN='https://your-site.netlify.app'
-$env:WORKSPACE_ROOT='C:\projects'
+$env:AGENT_WORKSPACES_ROOT='C:\LiteChatProjects'
 npm run bridge
 ```
 
@@ -65,6 +69,6 @@ The included `netlify.toml` already sets the build command, publish directory, a
 
 Hosting serves only the interface and WebAssembly runtime. GGUF inference uses the browser device. Ollama inference and commands use a bridge running on the user's computer. Neither a serverless host nor a phone browser can execute arbitrary OS commands on the user's PC by itself.
 
-Chats are saved in this browser's IndexedDB. New chat opens a new tab or window. Settings, including the pairing code, are saved in localStorage on this browser. The default theme is dark, with a light-mode switch.
+Chats are saved in this browser's IndexedDB. New chat starts a fresh conversation on the same page. Settings, including the pairing code, are saved in localStorage on this browser. The default theme is dark, with a light-mode switch.
 
 Image generation is available only when an installed Ollama model advertises the `image` capability and the user's Ollama version supports its image-generation endpoint. Browser GGUF text models do not generate images, and a light phone may not have enough memory for a separate local image model.
