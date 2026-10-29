@@ -3,13 +3,17 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { resolve } from 'node:path';
 import { listModels, ollamaChat, ollamaImage, ollamaStart, ollamaStop, ollamaChatStream } from './ollama.js';
-import { parseUnixHeredoc, writeWorkspaceFile } from './workspace.js';
-import { runJava } from './java.js';
+import { parseUnixHeredoc, writeWorkspaceFile, readWorkspaceFile, listWorkspaceFiles } from './workspace.js';
+import { runProject } from './projectRunner.js';
+import { defaultWorkspacesRoot, makeWorkspaceStore } from './agentWorkspaces.js';
+import { customSkillsRoot, makeSkillLibrary } from './skills.js';
 
 const port = Number(process.env.BRIDGE_PORT || 3210);
 const token = process.env.BRIDGE_TOKEN || randomBytes(18).toString('hex');
 const origins = new Set([`http://localhost:5173`, `http://127.0.0.1:5173`, `http://localhost:3001`, `http://127.0.0.1:3001`, ...(process.env.APP_ORIGIN || '').split(',').map(value => value.trim()).filter(Boolean)]);
 const root = resolve(process.env.WORKSPACE_ROOT || process.cwd());
+const agentWorkspaces = makeWorkspaceStore();
+const skills = makeSkillLibrary();
 const maxBody = 4 * 1024 * 1024;
 
 function json(res, status, body, origin) {
@@ -17,29 +21,39 @@ function json(res, status, body, origin) {
   res.end(JSON.stringify(body));
 }
 
-function runCommand({ command, cwd, shell }) {
+function runCommand(workspaceRoot, { command, cwd, shell }, signal) {
   if (typeof command !== 'string' || !command.trim() || command.length > 4000) throw new Error('Enter a command under 4,000 characters.');
   const heredoc = process.platform === 'win32' && parseUnixHeredoc(command);
-  if (heredoc) return writeWorkspaceFile(root, heredoc).then(result => ({ exitCode: 0, output: `Wrote ${result.path} (${result.bytes} bytes)`, path: result.path, cwd: root }));
-  const workdir = resolve(root, cwd || '.');
-  if (workdir !== root && !workdir.startsWith(root + (process.platform === 'win32' ? '\\' : '/'))) throw new Error('Working directory must be inside the configured workspace.');
+  if (heredoc) return writeWorkspaceFile(workspaceRoot, heredoc).then(result => ({ exitCode: 0, output: `Wrote ${result.path} (${result.bytes} bytes)`, path: result.path, cwd: workspaceRoot }));
+  const workdir = resolve(workspaceRoot, cwd || '.');
+  if (workdir !== workspaceRoot && !workdir.startsWith(workspaceRoot + (process.platform === 'win32' ? '\\' : '/'))) throw new Error('Working directory must be inside the configured workspace.');
   const selectedShell = process.platform === 'win32' && shell !== 'cmd' ? 'powershell.exe' : process.platform === 'win32' ? 'cmd.exe' : '/bin/sh';
   const args = selectedShell === 'powershell.exe' ? ['-NoProfile', '-Command', command] : selectedShell === 'cmd.exe' ? ['/d', '/s', '/c', command] : ['-lc', command];
   return new Promise((done, reject) => {
     const child = spawn(selectedShell, args, { cwd: workdir, windowsHide: true, env: process.env });
     let output = '';
     let finished = false;
-    const timer = setTimeout(() => child.kill(), 60000);
+    let timedOut = false;
+    const stop = () => {
+      if (!child.pid) return;
+      if (process.platform === 'win32') spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true }).on('error', () => child.kill());
+      else child.kill();
+    };
+    const abort = () => stop();
+    const timer = setTimeout(() => { timedOut = true; stop(); }, 60000);
+    signal?.addEventListener('abort', abort, { once: true });
     const append = chunk => { output = (output + chunk.toString()).slice(-20000); };
     child.stdout.on('data', append);
     child.stderr.on('data', append);
-    child.on('error', reject);
+    child.on('error', error => { clearTimeout(timer); signal?.removeEventListener('abort', abort); reject(error); });
     child.on('close', code => {
       if (finished) return;
       finished = true;
       clearTimeout(timer);
-      done({ exitCode: code, output, cwd: workdir });
+      signal?.removeEventListener('abort', abort);
+      done({ exitCode: timedOut ? -1 : code, output: timedOut ? `${output}\nTimed out after 60 seconds.` : output, cwd: workdir });
     });
+    if (signal?.aborted) abort();
   });
 }
 
@@ -82,9 +96,22 @@ http.createServer(async (req, res) => {
       for await (const chunk of upstream.body) res.write(chunk);
       res.end(); return;
     }
-    else if (req.method === 'POST' && req.url === '/exec') result = await runCommand(body);
-    else if (req.method === 'POST' && req.url === '/write-file') result = await writeWorkspaceFile(root, body);
-    else if (req.method === 'POST' && req.url === '/run-java') result = await runJava(root, body);
+    else if (req.method === 'POST' && req.url === '/agent-workspace') result = await agentWorkspaces.create(body.chatId);
+    else if (req.method === 'GET' && req.url === '/skills') result = { skills: await skills.list(), customRoot: customSkillsRoot };
+    else if (req.method === 'POST' && req.url === '/read-skill') result = await skills.read(body.id);
+    else if (req.method === 'POST' && req.url === '/exec') {
+      const controller = new AbortController();
+      res.on('close', () => controller.abort());
+      result = await runCommand(body.workspaceId ? (await agentWorkspaces.get(body.workspaceId)).path : root, body, controller.signal);
+    }
+    else if (req.method === 'POST' && req.url === '/write-file') result = await writeWorkspaceFile(body.workspaceId ? (await agentWorkspaces.get(body.workspaceId)).path : root, body);
+    else if (req.method === 'POST' && req.url === '/read-file') result = await readWorkspaceFile(body.workspaceId ? (await agentWorkspaces.get(body.workspaceId)).path : root, body);
+    else if (req.method === 'POST' && req.url === '/list-files') result = await listWorkspaceFiles(body.workspaceId ? (await agentWorkspaces.get(body.workspaceId)).path : root, body);
+    else if (req.method === 'POST' && req.url === '/run-project') {
+      const controller = new AbortController();
+      res.on('close', () => controller.abort());
+      result = await runProject(body.workspaceId ? (await agentWorkspaces.get(body.workspaceId)).path : root, body, controller.signal);
+    }
     else { json(res, 404, { error: 'Not found.' }, origin); return; }
     json(res, 200, result, origin);
   } catch (error) {
@@ -96,5 +123,7 @@ http.createServer(async (req, res) => {
   console.log(`Local bridge: http://127.0.0.1:${port}`);
   console.log(`Pairing code: ${token}`);
   console.log(`Command workspace: ${root}`);
+  console.log(`Agent chat workspaces: ${defaultWorkspacesRoot}`);
+  console.log(`Custom agent skills: ${customSkillsRoot}`);
   if (process.env.APP_ORIGIN) console.log(`Allowed deployed origin: ${process.env.APP_ORIGIN}`);
 });
