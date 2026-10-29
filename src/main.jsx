@@ -3,13 +3,13 @@ import { createRoot } from 'react-dom/client';
 import { ArrowDownToLine, ArrowUp, FolderOpen, Image, Menu, MessageCircle, Moon, Paperclip, Plus, RefreshCw, Settings, Sparkles, Square, Sun, Terminal, Trash2, X } from 'lucide-react';
 import { listChats, saveChat, deleteChat } from './storage.js';
 import { loadGguf, getGgufModel, validateGguf } from './localModels.js';
-import { discoverOllama, pairLocalBridge, complete, generateImage, runAgent, offloadModel, activateModel } from './engine.js';
+import { discoverOllama, discoverSkills, pairLocalBridge, complete, generateImage, runAgent, offloadModel, activateModel } from './engine.js';
 import { stoppedResult } from './stoppedResult.js';
 import './styles.css';
 import './local.css';
 import './improvements.css';
 
-const base = { bridgeUrl: 'http://127.0.0.1:3210', bridgeToken: '', context: 2048, maxTokens: 1024, temperature: 0.7, defaultModel: '', defaultMode: 'chat', theme: 'dark', thinking: true };
+const base = { bridgeUrl: 'http://127.0.0.1:3210', bridgeToken: '', context: 2048, maxTokens: 1024, temperature: 0.7, defaultModel: '', defaultMode: 'chat', theme: 'dark', thinking: true, disabledSkills: [] };
 const savedSettings = () => { try { return { ...base, ...JSON.parse(localStorage.getItem('lite-chat-settings') || '{}') }; } catch { return base; } };
 const id = () => crypto.randomUUID();
 const errText = error => error?.message || 'Something went wrong.';
@@ -31,6 +31,7 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [modelBusy, setModelBusy] = useState(false);
   const [connected, setConnected] = useState(false);
+  const [skillCatalog, setSkillCatalog] = useState({ skills: [], customRoot: '' });
   const [steps, setSteps] = useState([]);
   const [liveAnswer, setLiveAnswer] = useState(null);
   const [elapsed, setElapsed] = useState(0);
@@ -90,7 +91,9 @@ function App() {
       const paired = await pairLocalBridge(config);
       if (paired.bridgeToken !== config.bridgeToken) { setSettings(paired); config = paired; }
       if (!silent && model) await offloadModel(model, config);
-      const found = await discoverOllama(config);
+      const catalog = await discoverSkills(config);
+      setSkillCatalog(catalog);
+      const found = await discoverOllama(config).catch(error => { if (!silent) setError('Bridge connected, but Ollama is unavailable: ' + errText(error)); return []; });
       const all = getGgufModel() ? [...found, getGgufModel()] : found;
       setModels(all); setConnected(true);
       const nextId = silent ? all.find(item => item.id === config.defaultModel)?.id || all[0]?.id || '' : '';
@@ -98,9 +101,10 @@ function App() {
       const nextModel = all.find(item => item.id === nextId);
       const options = [nextModel?.capabilities.chat && 'chat', nextModel?.capabilities.imageGeneration && 'image', nextModel?.capabilities.tools && 'agent'].filter(Boolean);
       if (!options.includes(mode)) setMode(options.includes(config.defaultMode) ? config.defaultMode : options[0] || 'chat');
-      if (!silent) setError('');
+      if (!silent && found.length) setError('');
     } catch (error) {
       setConnected(false);
+      setSkillCatalog({ skills: [], customRoot: '' });
       if (getGgufModel()) { setModels([getGgufModel()]); setSelected(silent ? getGgufModel().id : ''); }
       else { setModels([]); setSelected(''); }
       if (!silent) setError(errText(error));
@@ -183,7 +187,11 @@ function App() {
       if (mode === 'image') result = { image: await generateImage(model, text, settings, controller.signal) };
       else if (mode === 'agent') {
         const history = before.filter(item => item.text).slice(-12).map(item => ({ role: item.role, content: item.text }));
-        const final = await runAgent(model, text, history, settings, controller.signal, step => { if (step.replace && trace.at(-1)?.kind === step.kind) trace[trace.length - 1] = step; else trace.push(step); setSteps([...trace]); });
+        const textFiles = selectedFiles.filter(file => !file.type.startsWith('image/') && !file.type.startsWith('audio/') && !file.name.toLowerCase().endsWith('.wav'));
+        const taskText = text + (await Promise.all(textFiles.map(async file => '\n\n[Attached file: ' + file.name + ']\n' + (await file.text()).slice(0, 30000)))).join('');
+        const mediaFiles = selectedFiles.filter(file => file.type.startsWith('image/') || file.type.startsWith('audio/') || file.name.toLowerCase().endsWith('.wav'));
+        const media = await Promise.all(mediaFiles.map(async file => ({ type: file.type.startsWith('image/') ? 'image' : 'audio', bytes: await file.arrayBuffer(), base64: model.source === 'ollama' ? (await dataUrl(file)).split(',')[1] : undefined })));
+        const final = await runAgent(model, taskText, history, settings, controller.signal, step => { if (step.replace && trace.at(-1)?.kind === step.kind) trace[trace.length - 1] = step; else trace.push(step); setSteps([...trace]); }, activeId, media);
         result = { text: final, steps: trace };
       } else {
         const textFiles = selectedFiles.filter(file => !file.type.startsWith('image/') && !file.type.startsWith('audio/') && !file.name.toLowerCase().endsWith('.wav'));
@@ -213,7 +221,7 @@ function App() {
     finally { abortRef.current = null; setBusy(false); setLiveAnswer(null); setSteps([]); }
   }
   const update = (key, value) => setSettings(previous => ({ ...previous, [key]: value }));
-  const attachable = mode === 'chat' && (caps.vision || caps.file || caps.audio);
+  const attachable = (mode === 'chat' || mode === 'agent') && (caps.vision || caps.file || caps.audio);
 
   return <div className="app-shell">
     <aside className={'sidebar ' + (showChats ? 'show-mobile-chats' : '')}><div className="brand"><div className="brand-icon"><Sparkles size={18} /></div>lite<span className="brand-light">chat</span><button className="close-mobile-chats" onClick={() => setShowChats(false)} aria-label="Close chats"><X size={18} /></button></div>
@@ -239,6 +247,12 @@ function App() {
       <div className="settings-grid"><label>Context tokens<input type="number" min="512" max="32768" value={settings.context} onChange={event => update('context', Number(event.target.value))} /></label><label>Output tokens<input type="number" min="64" max="8192" value={settings.maxTokens} onChange={event => update('maxTokens', Number(event.target.value))} /></label></div>
       <label>Temperature<input type="number" min="0" max="2" step="0.1" value={settings.temperature} onChange={event => update('temperature', Number(event.target.value))} /></label>
       <label className="check-label"><input type="checkbox" checked={settings.thinking} onChange={event => update('thinking', event.target.checked)} /> Enable thinking when supported</label>
+      <div className="settings-divider" />
+      <h3 className="settings-subhead">Agent tools</h3>
+      <p className="settings-note">Read and write files, list projects, run commands, build and test code, and read skills. Agent tools require the paired local bridge.</p>
+      <h3 className="settings-subhead">Agent skills</h3>
+      {skillCatalog.skills.length ? <div className="skill-list">{skillCatalog.skills.map(skill => <label className="skill-option" key={skill.id}><input type="checkbox" checked={!(settings.disabledSkills || []).includes(skill.id)} onChange={event => update('disabledSkills', event.target.checked ? (settings.disabledSkills || []).filter(id => id !== skill.id) : [...(settings.disabledSkills || []), skill.id])} /><span><strong>{skill.name}</strong><small>{skill.description}</small></span></label>)}</div> : <p className="settings-note">Connect the local bridge to see available skills.</p>}
+      {skillCatalog.customRoot && <p className="settings-note">Add a custom skill as &lt;skill-name&gt;/SKILL.md under {skillCatalog.customRoot}, then reconnect.</p>}
       <p className="settings-note">GGUF runs in this browser; reopen its file after a page reload. Ollama and Agent need the bridge running on this same device. For a deployed site, start the bridge with APP_ORIGIN set to this site's HTTPS origin and allow the browser's local-network prompt. On a phone, 127.0.0.1 refers to the phone, not your PC.</p>
     </div></div>}
   </div>;
@@ -246,5 +260,5 @@ function App() {
 
 function StepList({ steps }) { return <div className="step-list">{steps.map((step, index) => step.kind === 'plan' || step.kind === 'thought'
   ? <details className={'step ' + step.kind} key={`${index}-${!!step.live}`} open={!!step.live}><summary>{step.kind === 'plan' ? 'Plan' : 'Thinking'}{step.live ? ' · live' : ''}</summary><pre>{step.text}</pre></details>
-  : <div className={'step ' + step.kind} key={index}><strong>{step.kind === 'command' ? 'Command' : 'Result'}</strong><pre>{step.text}</pre></div>)}</div>; }
+  : <div className={'step ' + step.kind} key={index}><strong>{step.kind === 'command' ? 'Command' : step.kind === 'workspace' ? 'Workspace' : step.kind === 'skill' ? 'Skills' : 'Result'}</strong><pre>{step.text}</pre></div>)}</div>; }
 createRoot(document.getElementById('root')).render(<App />);
