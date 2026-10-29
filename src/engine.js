@@ -1,4 +1,6 @@
 import { ggufChat, resumeGguf, unloadGguf } from './localModels.js';
+import { agentRunTarget } from './agentRunTarget.js';
+import { textToolCalls } from './agentToolCalls.js';
 
 function bridgeBase(settings) {
   const configured = settings.bridgeUrl.replace(/\/$/, '');
@@ -41,6 +43,10 @@ export async function bridge(path, settings, body, signal) {
 
 export async function discoverOllama(settings) {
   return (await bridge('/models', settings)).models;
+}
+
+export async function discoverSkills(settings) {
+  return bridge('/skills', settings);
 }
 
 export async function pairLocalBridge(settings) {
@@ -125,6 +131,18 @@ export async function generateImage(model, prompt, settings, signal) {
 }
 
 export const commandTool = [{ type: 'function', function: {
+  name: 'list_files',
+  description: 'List files in this chat workspace, skipping build caches. Use to inspect existing projects.',
+  parameters: { type: 'object', properties: { path: { type: 'string', description: 'Relative directory; use . for the workspace root.' } }, required: ['path'] },
+} }, { type: 'function', function: {
+  name: 'read_file',
+  description: 'Read a UTF-8 text file in this chat workspace. Use before editing existing code or diagnosing errors.',
+  parameters: { type: 'object', properties: { path: { type: 'string', description: 'Relative path of a text file.' } }, required: ['path'] },
+} }, { type: 'function', function: {
+  name: 'read_skill',
+  description: 'Read the full instructions for an available skill by its ID. Use a relevant skill before doing specialized work.',
+  parameters: { type: 'object', properties: { id: { type: 'string', description: 'Skill ID from the available skills list.' } }, required: ['id'] },
+} }, { type: 'function', function: {
   name: 'run_command',
   description: 'Run a command in the local workspace. Use it to inspect, build, and test. On Windows the default shell is PowerShell. Use write_file to create source files.',
   parameters: { type: 'object', properties: {
@@ -140,70 +158,133 @@ export const commandTool = [{ type: 'function', function: {
     content: { type: 'string', description: 'The entire file content.' },
   }, required: ['path', 'content'] },
 } }, { type: 'function', function: {
-  name: 'run_java',
-  description: 'Compile and run a Java source file created in the workspace. Use this to verify Java apps; it reports compiler errors and program output.',
+  name: 'run_project',
+  description: 'Build, test, or run a plain Java, Maven, or Gradle project, or run a Python or JavaScript file. Select a project directory or source file inside this chat workspace. Use after writing code, inspect failures, and correct them.',
   parameters: { type: 'object', properties: {
-    path: { type: 'string', description: 'Java source path relative to the workspace, e.g. src/TimeUntilMidnight.java.' },
+    path: { type: 'string', description: 'Project directory or Java, Python, or JavaScript file relative to this chat workspace.' },
+    action: { type: 'string', enum: ['build', 'test', 'run'], description: 'Use run when the task asks for a working application.' },
+    mainClass: { type: 'string', description: 'Optional fully qualified Java main class when more than one exists.' },
+    task: { type: 'string', description: 'Optional Maven goal or Gradle task when the project needs a custom task.' },
+    args: { type: 'array', items: { type: 'string' }, description: 'Optional program arguments.' },
     input: { type: 'string', description: 'Optional standard input for interactive programs.' },
-  }, required: ['path'] },
+  }, required: ['path', 'action'] },
 } }];
 
-export async function runAgent(model, userText, history, settings, signal, onStep) {
+export async function runAgent(model, userText, history, settings, signal, onStep, chatId, media = []) {
   if (!model.capabilities.tools) throw new Error('This model does not advertise tool use.');
   if (!settings.bridgeToken) throw new Error('Pair the local bridge in Settings before using Agent mode.');
+  const workspace = await bridge('/agent-workspace', settings, { chatId }, signal);
+  onStep({ kind: 'workspace', text: workspace.path });
+  const catalog = await discoverSkills(settings);
+  const available = catalog.skills.filter(skill => !(settings.disabledSkills || []).includes(skill.id));
+  const automatic = available.filter(skill => skill.id === 'core'
+    || skill.id === 'java' && /\b(java|javac|maven|mvn|gradle|jar|spring)\b/i.test(userText)
+    || skill.id === 'python' && /\b(python|\.py|pip)\b/i.test(userText)
+    || skill.id === 'web' && /\b(javascript|node|npm|react|web|html|css|\.js)\b/i.test(userText)
+    || skill.id === 'debug' && /\b(fix|debug|error|fail|broken|repair)\b/i.test(userText)
+    || !['core', 'java', 'python', 'web', 'debug'].includes(skill.id) && new RegExp(`\\b${skill.id}\\b`, 'i').test(userText));
+  const loadedSkills = await Promise.all(automatic.map(skill => bridge('/read-skill', settings, { id: skill.id }, signal)));
+  if (loadedSkills.length) onStep({ kind: 'skill', text: loadedSkills.map(skill => skill.name).join(', ') });
+  const requiresCode = /\b(create|build|write|make|develop|implement|generate)\b/i.test(userText) && /\b(app|program|code|script|project|file|java|python|javascript|js)\b|\.(?:java|js|mjs|cjs|py)\b/i.test(userText);
+  if (model.source === 'ollama' && media.some(item => item.type === 'audio')) throw new Error('Audio agent input is available only for a compatible browser GGUF model.');
+  const taskMessage = model.source === 'ollama'
+    ? { role: 'user', content: userText, ...(media.length ? { images: media.filter(item => item.type === 'image').map(item => item.base64) } : {}) }
+    : { role: 'user', content: media.length ? [...media.map(item => ({ type: item.type, data: item.bytes })), { type: 'text', text: userText }] : userText };
   const messages = [
-    { role: 'system', content: 'You are a local coding agent. First write a concise plan. Use write_file to create complete source files and run_command to inspect, build, and test. For Java files use run_java to compile and run the source; write_file also runs Java files automatically so you can see and fix compiler/runtime errors. On Windows, run_command uses PowerShell by default. Never use Unix heredocs such as cat <<EOF or one echo command per source line. Inspect each tool result before proceeding. Finish with a clear summary of changes and test results. Never claim a command succeeded unless its output confirms it.' },
+    { role: 'system', content: `You are a local coding agent. Tools operate in a separate workspace for this chat. Create files relative to its root. Use write_file for whole source files, list_files and read_file to inspect, run_project to build and run, and run_command for other commands. On Windows, run_command uses PowerShell by default. Never use Unix heredocs or one echo command per source line. After creating code, actually run it and inspect the result. Fix failures and retry. Never claim success without a zero exit code. Available skills: ${available.map(skill => `${skill.id}: ${skill.description}`).join('; ')}. Use read_skill when another skill is relevant.\n\n${loadedSkills.map(skill => skill.content).join('\n\n')}` },
     ...history,
-    { role: 'user', content: userText },
+    taskMessage,
   ];
   const plan = await complete(model, [
     { role: 'system', content: 'Write a short numbered plan for the user task. Do not call tools yet.' },
-    { role: 'user', content: userText },
+    taskMessage,
   ], settings, signal, undefined, update => onStep({ kind: 'plan', text: update.content || update.thinking || 'Planning…', live: true, replace: true }));
   onStep({ kind: 'plan', text: plan.content || plan.thinking || 'Plan ready.', live: false, replace: true });
   let toolsUsed = 0;
   let retryNeeded = 0;
-  let javaStatus;
+  let projectStatus;
+  let projectFilesWritten = false;
+  let projectRunSucceeded = false;
+  let projectRunAttempted = false;
+  const writtenPaths = [];
   for (let i = 0; i < 30; i++) {
     if (signal.aborted) throw new DOMException('Stopped', 'AbortError');
-    const reply = await complete(model, messages, settings, signal, commandTool, update => {
+    const tail = messages.slice(-12);
+    while (tail[0]?.role === 'tool') tail.shift();
+    const recentMessages = messages.length > 18 ? [messages[0], taskMessage, ...tail] : messages;
+    const reply = await complete(model, recentMessages, settings, signal, commandTool, update => {
       const text = [update.thinking, update.content].filter(Boolean).join('\n\n');
       if (text) onStep({ kind: 'thought', text, live: true, replace: true });
     });
+    if (!reply.tool_calls?.length) {
+      const parsedCalls = textToolCalls(reply.content, userText);
+      if (parsedCalls.length) reply.tool_calls = parsedCalls;
+    }
     messages.push(reply);
     if (reply.content || reply.thinking) onStep({ kind: 'thought', text: [reply.thinking, reply.content].filter(Boolean).join('\n\n'), live: false, replace: true });
     if (!reply.tool_calls?.length) {
-      if ((!toolsUsed || (javaStatus && javaStatus.exitCode !== 0)) && retryNeeded++ < 2) {
-        messages.push({ role: 'user', content: javaStatus && javaStatus.exitCode !== 0 ? 'The Java app did not compile or run successfully. Correct the source and run it again with the tools.' : 'You have not created or tested any files yet. Use the available tools before giving a final answer.' });
+      const target = agentRunTarget(writtenPaths) || (projectFilesWritten ? '.' : null);
+      if (target && !projectRunAttempted && !projectRunSucceeded) {
+        projectRunAttempted = true;
+        onStep({ kind: 'command', text: `Run project ${target}` });
+        try { projectStatus = await bridge('/run-project', settings, { workspaceId: workspace.id, path: target, action: 'run' }, signal); }
+        catch (error) { projectStatus = { exitCode: -1, output: error.message }; }
+        projectRunSucceeded = projectStatus.exitCode === 0;
+        onStep({ kind: 'result', text: `Exit ${projectStatus.exitCode}\n${projectStatus.output}` });
+        messages.push({ role: 'user', content: `The project was run automatically after writing files. Exit ${projectStatus.exitCode}. Output:\n${String(projectStatus.output || '').slice(-3000)}\n${projectRunSucceeded ? 'Summarize the verified result.' : 'Fix the failure and run again using the tools.'}` });
         continue;
       }
-      if (javaStatus && javaStatus.exitCode !== 0) return `Java run failed. Review the tool result above.\n${javaStatus.output}`;
+      if ((!toolsUsed || requiresCode && !projectFilesWritten || (projectStatus && projectStatus.exitCode !== 0) || (projectFilesWritten && !projectRunSucceeded)) && retryNeeded++ < 2) {
+        messages.push({ role: 'user', content: projectStatus && projectStatus.exitCode !== 0 ? 'The project did not build or run successfully. Correct it and run it again with the tools.' : projectFilesWritten && !projectRunSucceeded ? 'You created code files but have not run the project. Call run_project with action run, inspect its output, and fix any failure.' : 'No source file has been created. An echo command is not a created program. Call write_file now. If you cannot return a native tool call, reply with only valid JSON like {"name":"write_file","arguments":{"path":"Hello.js","content":"console.log(1)"}}. Use the actual requested filename and complete source code.' });
+        continue;
+      }
+      if (projectStatus && projectStatus.exitCode !== 0) return `Project run failed. Review the tool result above.\n${projectStatus.output}`;
+      if (requiresCode && !projectFilesWritten) return 'The model did not create a source file, so the requested code could not be tested. Try a model that reliably follows tool calls.';
+      if (projectFilesWritten && !projectRunSucceeded) return 'Project files were created but the app was not run successfully. Review the tool steps above.';
       if (!toolsUsed) return 'The model did not use the available tools, so no files were created or run.';
       return reply.content || 'Task finished.';
     }
     for (const call of reply.tool_calls) {
-      if (!['run_command', 'write_file', 'run_java'].includes(call.function?.name)) continue;
+      if (!['run_command', 'write_file', 'run_project', 'read_file', 'list_files', 'read_skill'].includes(call.function?.name)) continue;
       toolsUsed++;
       let args;
       try { args = typeof call.function.arguments === 'string' ? JSON.parse(call.function.arguments) : call.function.arguments; }
       catch { args = {}; }
       if (!args || typeof args !== 'object') args = {};
       if (call.function.name === 'run_command' && (typeof args.cwd !== 'string' || args.cwd.startsWith('/') || /^[A-Za-z]:/.test(args.cwd) || args.cwd.split(/[\\/]/).includes('..'))) args.cwd = '.';
-      onStep({ kind: 'command', text: call.function.name === 'write_file' ? `Write ${args.path || '(invalid path)'}` : call.function.name === 'run_java' ? `Compile and run ${args.path || '(invalid path)'}` : args.command || '(invalid command)' });
+      onStep({ kind: 'command', text: call.function.name === 'write_file' ? `Write ${args.path || '(invalid path)'}` : call.function.name === 'run_project' ? `${args.action || 'Run'} project ${args.path || '.'}` : call.function.name === 'read_file' ? `Read ${args.path || '(invalid path)'}` : call.function.name === 'list_files' ? `List ${args.path || '.'}` : call.function.name === 'read_skill' ? `Read skill ${args.id || '(invalid ID)'}` : args.command || '(invalid command)' });
       let output;
-      try { output = await bridge(call.function.name === 'write_file' ? '/write-file' : call.function.name === 'run_java' ? '/run-java' : '/exec', settings, args, signal); }
-      catch (error) { output = { exitCode: -1, output: error.message }; }
-      if (call.function.name !== 'run_java' && output.path?.toLowerCase().endsWith('.java')) {
-        try { output.javaCheck = await bridge('/run-java', settings, { path: output.path }, signal); }
-        catch (error) { output.javaCheck = { exitCode: -1, output: error.message }; }
+      try {
+        if (call.function.name === 'read_skill' && !available.some(skill => skill.id === args.id)) throw new Error('Skill is unavailable or disabled.');
+        const route = { write_file: '/write-file', run_project: '/run-project', run_command: '/exec', read_file: '/read-file', list_files: '/list-files', read_skill: '/read-skill' }[call.function.name];
+        output = await bridge(route, settings, { ...args, workspaceId: workspace.id }, signal);
       }
-      if (call.function.name === 'run_java') javaStatus = output;
-      else if (output.javaCheck) javaStatus = output.javaCheck;
-      onStep({ kind: 'result', text: output.bytes !== undefined ? `Wrote ${output.path} (${output.bytes} bytes)${output.javaCheck ? `\nJava check: ${output.javaCheck.output}` : ''}` : `Exit ${output.exitCode}\n${output.output}${output.javaCheck ? `\nJava check: ${output.javaCheck.output}` : ''}` });
+      catch (error) { output = { exitCode: -1, output: error.message }; }
+      if (output.path && /(?:\.(?:java|py|js|mjs|cjs)|(?:^|[\\/])pom\.xml|(?:^|[\\/])build\.gradle(?:\.kts)?)$/i.test(output.path)) { projectFilesWritten = true; projectRunSucceeded = false; projectRunAttempted = false; writtenPaths.push(output.path); }
+      if (call.function.name === 'run_command' && output.exitCode === 0 && /(?:\b(?:Set-Content|Out-File|Add-Content|New-Item)\b|\s>{1,2}\s*\S)/i.test(args.command || '')) { projectFilesWritten = true; projectRunSucceeded = false; projectRunAttempted = false; }
+      if (call.function.name === 'run_project') {
+        projectStatus = output;
+        projectRunAttempted = true;
+        if (args.action === 'run' && output.exitCode === 0) projectRunSucceeded = true;
+      } else if (call.function.name === 'run_command' && output.exitCode === 0 && /\b(?:java(?:\.exe)?\s+(?!-version\b)|mvn(?:w)?\S*\s+[^\n]*(?:exec:java|spring-boot:run)|gradle(?:w)?\S*\s+[^\n]*(?:\brun\b|bootRun))/i.test(args.command || '')) {
+        projectStatus = output;
+        projectRunSucceeded = true;
+      }
+      onStep({ kind: 'result', text: output.bytes !== undefined ? `Wrote ${output.path} (${output.bytes} bytes)` : output.files ? output.files.join('\n') || '(empty folder)' : output.content !== undefined ? String(output.content).slice(0, 12000) || '(empty file)' : `Exit ${output.exitCode}\n${output.output}` });
+      const feedback = output.bytes !== undefined ? output : output.files ? output : output.content !== undefined ? { id: output.id, path: output.path, content: output.content.slice(0, 6000) } : { exitCode: output.exitCode, output: String(output.output || '').slice(-2500), path: output.path, kind: output.kind };
       messages.push(model.source === 'gguf'
-        ? { role: 'tool', tool_call_id: call.id, content: JSON.stringify(output) }
-        : { role: 'tool', content: JSON.stringify(output) });
+        ? { role: 'tool', tool_call_id: call.id, content: JSON.stringify(feedback) }
+        : { role: 'tool', content: JSON.stringify(feedback) });
     }
   }
+  const lastTarget = agentRunTarget(writtenPaths) || (projectFilesWritten ? '.' : null);
+  if (lastTarget && !projectRunAttempted && !projectRunSucceeded && !signal.aborted) {
+    onStep({ kind: 'command', text: `Run project ${lastTarget}` });
+    try { projectStatus = await bridge('/run-project', settings, { workspaceId: workspace.id, path: lastTarget, action: 'run' }, signal); }
+    catch (error) { projectStatus = { exitCode: -1, output: error.message }; }
+    onStep({ kind: 'result', text: `Exit ${projectStatus.exitCode}\n${projectStatus.output}` });
+  }
+  if (projectStatus?.exitCode === 0) return `The code ran successfully.\n${String(projectStatus.output || '').slice(-3000)}`;
+  if (projectStatus) return `The code was run, but it failed.\n${String(projectStatus.output || '').slice(-3000)}`;
   return 'Stopped after 30 tool rounds. Review the steps above before continuing.';
 }
