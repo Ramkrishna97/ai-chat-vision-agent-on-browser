@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { ArrowDownToLine, Check, Copy, FolderOpen, Paperclip, Settings, Sparkles } from 'lucide-react';
 import { splitFencedCode } from './responseFormat.js';
+import { modelDisplayName } from './modelDisplay.js';
 
 function CopyButton({ text, label }) {
   const [status, setStatus] = useState('idle');
@@ -24,7 +25,21 @@ function StepList({ steps }) {
     : <div className={'step ' + step.kind} key={index}><strong>{step.kind === 'command' ? 'Command' : step.kind === 'workspace' ? 'Workspace' : step.kind === 'skill' ? 'Skills' : 'Result'}</strong><pre>{step.text}</pre></div>)}</div>;
 }
 
-export default function Conversation({ messages, busy, mode, liveAnswer, steps, elapsed, contextMax, contextUsed, contextApproximate, conversationRef, followBottomRef, onLoadGguf, onSettings }) {
+function ModelLoadOptions({ bridgeModels, connected, loading, modelBusy, onLoadGguf, onLoadImage, onChooseModel, onRefreshOllama, onSettings }) {
+  return <div className="model-load-options" aria-label="Load a model">
+    <p>Load a model to continue this chat.</p>
+    <div className="start-actions">
+      <button onClick={onLoadGguf} disabled={loading || modelBusy}><FolderOpen size={17} /> {loading ? 'Loading chat GGUF…' : 'Load chat GGUF'}</button>
+      <button onClick={onLoadImage} disabled={loading || modelBusy}><Sparkles size={17} /> Load image model</button>
+      {bridgeModels.length ? <select aria-label="Load local model" defaultValue="" disabled={loading || modelBusy} onChange={event => { if (event.target.value) onChooseModel(event.target.value); }}>
+        <option value="">Load Ollama or image model…</option>
+        {bridgeModels.map(item => <option key={item.id} value={item.id}>{modelDisplayName(item)}</option>)}
+      </select> : <button onClick={connected ? onRefreshOllama : onSettings} disabled={loading || modelBusy}><Settings size={17} /> {connected ? 'Find Ollama models' : 'Connect Ollama'}</button>}
+    </div>
+  </div>;
+}
+
+export default function Conversation({ messages, busy, mode, liveAnswer, steps, elapsed, contextMax, contextUsed, contextApproximate, conversationRef, followBottomRef, model, bridgeModels, connected, loading, modelBusy, onLoadGguf, onLoadImage, onChooseModel, onRefreshOllama, onSettings }) {
   return <>
     <section className="conversation" aria-label="Conversation" ref={conversationRef} onScroll={event => { const panel = event.currentTarget; followBottomRef.current = panel.scrollHeight - panel.scrollTop - panel.clientHeight < 96; }}>
       {messages.length ? <div className="message-list">
@@ -41,7 +56,8 @@ export default function Conversation({ messages, busy, mode, liveAnswer, steps, 
           </div>
         </div>)}
         {busy && <div className="message assistant"><div className="avatar"><Sparkles size={16} /></div><div className="message-content"><div className="message-author">{mode === 'image' ? 'Creating image' : mode === 'agent' ? 'Planning and running' : liveAnswer?.content ? 'Writing response' : 'Reading your request'} · {elapsed}s</div>{liveAnswer?.thinking && <details className="thinking-block" open><summary>Thinking</summary><pre>{liveAnswer.thinking}</pre></details>}{liveAnswer?.content ? <div className="message-text">{liveAnswer.content}<span className="live-cursor" /></div> : steps.length ? <StepList steps={steps} /> : <div className="work-indicator"><span /><span /><span /></div>}</div></div>}
-      </div> : <div className="welcome"><div className="welcome-icon"><Sparkles size={29} /></div><div className="eyebrow">LOCAL AI WORKSPACE</div><h1>Your ideas, <em>your device.</em></h1><p>Connect Ollama or open a GGUF model to begin.<br />Your chats stay in this browser.</p><div className="start-actions"><button onClick={onLoadGguf}><FolderOpen size={17} /> Load GGUF</button><button onClick={onSettings}><Settings size={17} /> Connect Ollama</button></div></div>}
+        {!model && !busy && <ModelLoadOptions {...{ bridgeModels, connected, loading, modelBusy, onLoadGguf, onLoadImage, onChooseModel, onRefreshOllama, onSettings }} />}
+      </div> : <div className="welcome"><div className="welcome-icon"><Sparkles size={29} /></div><div className="eyebrow">LOCAL AI WORKSPACE</div><h1>Your ideas, <em>your device.</em></h1><p>{model ? 'Type a message below to begin.' : 'Connect Ollama or open a GGUF model to begin.'}<br />Your chats stay in this browser.</p>{!model && <ModelLoadOptions {...{ bridgeModels, connected, loading, modelBusy, onLoadGguf, onLoadImage, onChooseModel, onRefreshOllama, onSettings }} />}</div>}
     </section>
     <div className="context-meter" role="status" aria-label="Context usage"><span>{contextApproximate ? 'Estimated context' : 'Context'} {contextUsed.toLocaleString()} / {contextMax.toLocaleString()} tokens</span><div className="context-meter-track"><div style={{ width: Math.min(100, contextUsed / Math.max(1, contextMax) * 100) + '%' }} /></div></div>
   </>;

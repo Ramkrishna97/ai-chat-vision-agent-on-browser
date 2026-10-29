@@ -5,3 +5,5 @@ dist/
 .netlify/
 .litechat-runner.json
 bridge-origin.txt
+.playwright-cli/
+.image-engine-test/

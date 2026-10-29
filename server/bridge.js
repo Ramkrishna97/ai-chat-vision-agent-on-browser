@@ -3,6 +3,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { resolve } from 'node:path';
 import { listModels, ollamaChat, ollamaImage, ollamaStart, ollamaStop, ollamaChatStream } from './ollama.js';
+import { listImageModels, generateLocalImage, checkLocalImageModel, unloadLocalImageModel, saveImageModelFile, loadImageModel, getImageModelOptions, imageEngineStatus, startImageEngine } from './sdcpp.js';
 import { parseUnixHeredoc, writeWorkspaceFile, readWorkspaceFile, listWorkspaceFiles } from './workspace.js';
 import { runProject } from './projectRunner.js';
 import { defaultWorkspacesRoot, makeWorkspaceStore } from './agentWorkspaces.js';
@@ -61,7 +62,7 @@ http.createServer(async (req, res) => {
   const origin = req.headers.origin;
   if (origin && !origins.has(origin)) { json(res, 403, { error: 'Origin not allowed.' }); return; }
   if (req.method === 'OPTIONS') {
-    res.writeHead(204, { 'Access-Control-Allow-Origin': origin || '', 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type, X-Bridge-Token', 'Access-Control-Allow-Private-Network': 'true', 'Access-Control-Max-Age': '600', Vary: 'Origin' });
+    res.writeHead(204, { 'Access-Control-Allow-Origin': origin || '', 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type, X-Bridge-Token, X-File-Name, X-Model-Category', 'Access-Control-Allow-Private-Network': 'true', 'Access-Control-Max-Age': '600', Vary: 'Origin' });
     res.end(); return;
   }
   const localOrigins = new Set(['http://localhost:5173', 'http://127.0.0.1:5173', 'http://localhost:3001', 'http://127.0.0.1:3001']);
@@ -76,6 +77,10 @@ http.createServer(async (req, res) => {
   const b = Buffer.from(token);
   if (a.length !== b.length || !timingSafeEqual(a, b)) { json(res, 401, { error: 'Enter the pairing code printed by the local bridge.' }, origin); return; }
   try {
+    if (req.method === 'POST' && req.url === '/image-model-file') {
+      json(res, 200, await saveImageModelFile(req, { name: req.headers['x-file-name'], category: req.headers['x-model-category'] }), origin);
+      return;
+    }
     let raw = '';
     for await (const chunk of req) {
       raw += chunk;
@@ -83,11 +88,23 @@ http.createServer(async (req, res) => {
     }
     const body = raw ? JSON.parse(raw) : {};
     let result;
-    if (req.method === 'GET' && req.url === '/models') result = { models: await listModels(), platform: process.platform };
+    if (req.method === 'GET' && req.url === '/models') {
+      const [ollama, images] = await Promise.allSettled([listModels(), listImageModels()]);
+      if (ollama.status === 'rejected' && images.status === 'rejected') throw ollama.reason;
+      result = { models: [...(ollama.status === 'fulfilled' ? ollama.value : []), ...(images.status === 'fulfilled' ? images.value : [])].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })), platform: process.platform };
+    }
     else if (req.method === 'POST' && req.url === '/chat') result = await ollamaChat(body);
-    else if (req.method === 'POST' && req.url === '/image') result = await ollamaImage(body);
-    else if (req.method === 'POST' && req.url === '/start') result = await ollamaStart(body);
-    else if (req.method === 'POST' && req.url === '/stop') result = await ollamaStop(body);
+    else if (req.method === 'POST' && req.url === '/image') {
+      const controller = new AbortController();
+      res.on('close', () => controller.abort());
+      result = body.source === 'sdcpp' ? await generateLocalImage(body, controller.signal) : await ollamaImage(body, controller.signal);
+    }
+    else if (req.method === 'POST' && req.url === '/start') result = body.source === 'sdcpp' ? await checkLocalImageModel() : await ollamaStart(body);
+    else if (req.method === 'POST' && req.url === '/stop') result = body.source === 'sdcpp' ? await unloadLocalImageModel() : await ollamaStop(body);
+    else if (req.method === 'POST' && req.url === '/image-model-load') result = await loadImageModel(body);
+    else if (req.method === 'GET' && req.url === '/image-model-options') result = await getImageModelOptions(true);
+    else if (req.method === 'GET' && req.url === '/image-engine-status') result = await imageEngineStatus();
+    else if (req.method === 'POST' && req.url === '/image-engine-start') result = await startImageEngine();
     else if (req.method === 'POST' && req.url === '/chat-stream') {
       const controller = new AbortController();
       res.on('close', () => controller.abort());

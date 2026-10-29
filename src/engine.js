@@ -36,7 +36,7 @@ export async function bridge(path, settings, body, signal) {
     method: body === undefined ? 'GET' : 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Bridge-Token': settings.bridgeToken },
     body: body === undefined ? undefined : JSON.stringify(body),
-    signal: signal || AbortSignal.timeout(path === '/models' ? 15000 : 300000),
+    signal: signal || AbortSignal.timeout(path === '/models' ? 15000 : ['/image', '/image-model-load'].includes(path) ? 16 * 60_000 : 300000),
   }).catch(error => { throw bridgeError(error, settings); });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(response.status === 403 ? `This site's origin is not allowed by the local bridge. Start the bridge with APP_ORIGIN=${location.origin}.` : data.error || `Local bridge returned ${response.status}.`);
@@ -45,6 +45,29 @@ export async function bridge(path, settings, body, signal) {
 
 export async function discoverOllama(settings) {
   return (await bridge('/models', settings)).models;
+}
+
+export async function discoverImageModels(settings) {
+  return bridge('/image-model-options', settings);
+}
+
+export async function imageEngineStatus(settings) { return bridge('/image-engine-status', settings); }
+export async function startImageEngine(settings, signal) { return bridge('/image-engine-start', settings, {}, signal); }
+
+export async function uploadImageModelFile(file, category, settings, signal) {
+  const response = await fetch(`${bridgeBase(settings)}/image-model-file`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream', 'X-Bridge-Token': settings.bridgeToken, 'X-File-Name': encodeURIComponent(file.name), 'X-Model-Category': category },
+    body: file,
+    signal,
+  }).catch(error => { throw bridgeError(error, settings); });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || `Image file upload failed (${response.status}).`);
+  return data;
+}
+
+export async function loadImageModel(recipeId, models, settings, signal) {
+  return bridge('/image-model-load', settings, { recipeId, models }, signal);
 }
 
 export async function discoverSkills(settings) {
@@ -64,12 +87,12 @@ export async function pairLocalBridge(settings) {
 export async function offloadModel(model, settings) {
   if (!model) return;
   if (model.source === 'gguf') return unloadGguf();
-  return bridge('/stop', settings, { model: model.id });
+  return bridge('/stop', settings, { model: model.id, source: model.source });
 }
 
 export async function activateModel(model, settings) {
   if (model.source === 'gguf') return resumeGguf();
-  return bridge('/start', settings, { model: model.id });
+  return bridge('/start', settings, { model: model.id, source: model.source });
 }
 
 async function streamOllama(body, settings, signal, onUpdate) {
@@ -126,8 +149,8 @@ export async function complete(model, messages, settings, signal, tools, onUpdat
 }
 
 export async function generateImage(model, prompt, settings, signal) {
-  if (model.source !== 'ollama') throw new Error('Image generation needs an Ollama image model.');
-  const result = await bridge('/image', settings, { model: model.id, prompt }, signal);
+  if (!['ollama', 'sdcpp'].includes(model.source)) throw new Error('Image generation needs an image model connected through the local bridge.');
+  const result = await bridge('/image', settings, { model: model.id, source: model.source, prompt }, signal);
   const image = result.images?.[0] || result.image;
   if (!image) throw new Error('The model did not return an image.');
   return image.startsWith('data:') ? image : `data:image/png;base64,${image}`;

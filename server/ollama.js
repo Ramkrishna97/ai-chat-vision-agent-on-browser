@@ -26,6 +26,7 @@ export function normalizeModel(summary, details) {
     source: 'ollama',
     size: summary.size || 0,
     context,
+    reportedCapabilities: [...raw],
     capabilities: {
       chat: raw.has('completion') || raw.has('chat'),
       vision: raw.has('vision'),
@@ -48,8 +49,7 @@ export async function listModels(signal) {
       catch { return normalizeModel(summary, {}); }
     })));
   }
-  return models.filter(model => model.capabilities.chat || model.capabilities.imageGeneration)
-    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+  return models.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
 }
 
 export function ollamaChat(body, signal) {

@@ -14,7 +14,7 @@ test('Ollama capabilities map to the controls shown in the UI', () => {
   assert.equal(model.context, 8192);
 });
 
-test('discovery keeps local usable models and sorts by name', async () => {
+test('discovery lists all local models and reports unsupported capabilities', async () => {
   const original = globalThis.fetch;
   globalThis.fetch = async (url, options) => {
     if (url.endsWith('/api/tags')) return { ok: true, json: async () => ({ models: [
@@ -24,7 +24,12 @@ test('discovery keeps local usable models and sorts by name', async () => {
     const name = JSON.parse(options.body).model;
     return { ok: true, json: async () => ({ capabilities: name === 'embed' ? ['embedding'] : ['completion'] }) };
   };
-  try { assert.deepEqual((await listModels()).map(model => model.id), ['large', 'small']); }
+  try {
+    const models = await listModels();
+    assert.deepEqual(models.map(model => model.id), ['embed', 'large', 'small']);
+    assert.equal(models[0].capabilities.imageGeneration, false);
+    assert.deepEqual(models[0].reportedCapabilities, ['embedding']);
+  }
   finally { globalThis.fetch = original; }
 });
 

@@ -1,5 +1,6 @@
 import { Wllama } from '@wllama/wllama';
 import wasmUrl from '../node_modules/@wllama/wllama/esm/wasm/wllama.wasm?url';
+import { ggufInfo } from './ggufKind.js';
 
 let runtime;
 let model;
@@ -25,6 +26,8 @@ export async function validateGguf(files) {
 
 export async function loadGguf(files, context = 2048) {
   await validateGguf(files);
+  const fileInfo = await Promise.all(files.map(ggufInfo));
+  if (fileInfo.every(item => item.complete && !item.hasTokenizer)) throw new Error('This GGUF has no text tokenizer, so the browser chat runtime cannot use it. If it is an image model, choose Load image model and a compatible local diffusion recipe.');
   await unloadGguf(true);
   const nextRuntime = new Wllama({ default: wasmUrl });
   try { await nextRuntime.loadModel(files, { n_ctx: context, n_threads: 1, jinja: true }); }
